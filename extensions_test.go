@@ -10,6 +10,7 @@ import (
 
 	"github.com/graphql-go/graphql"
 	"github.com/graphql-go/graphql/gqlerrors"
+	"github.com/graphql-go/graphql/language/location"
 	"github.com/graphql-go/graphql/testutil"
 )
 
@@ -438,6 +439,75 @@ func TestExtensionContextPropagation(t *testing.T) {
 
 	if !reflect.DeepEqual(expectedCtxPathTrace, ctxPathTrace) {
 		t.Fatalf("Unexpected ctx path trace, Diff: %v", testutil.Diff(expectedCtxPathTrace, ctxPathTrace))
+	}
+}
+
+func TestExtensionErrorPropagation(t *testing.T) {
+	testType := graphql.NewObject(graphql.ObjectConfig{
+		Name: "Test",
+		Fields: graphql.Fields{
+			"foo": &graphql.Field{Type: graphql.String},
+			"bar": &graphql.Field{Type: graphql.String},
+			"baz": &graphql.Field{Type: graphql.String},
+		},
+	})
+	type test struct {
+		Foo string
+		Bar string
+		Baz string
+	}
+	schema, err := graphql.NewSchema(graphql.SchemaConfig{
+		Query: graphql.NewObject(graphql.ObjectConfig{
+			Name: "Query",
+			Fields: graphql.Fields{
+				"a": &graphql.Field{
+					Type: testType,
+					Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+						return nil, errors.New("test error")
+					},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatal("Error in schema", err)
+	}
+
+	type ctxKey struct{}
+
+	ext := newtestExt("testExt")
+	ext.resolveFieldDidStartFn = func(ctx context.Context, i *graphql.ResolveInfo) (context.Context, graphql.ResolveFieldFinishFunc) {
+		ctx = context.WithValue(ctx, ctxKey{}, "some value")
+		return ctx, func(interface{}, error) {}
+	}
+
+	query := `query { a { foo bar baz } }`
+	schema.AddExtensions(ext)
+
+	result := graphql.Do(graphql.Params{
+		Schema:        schema,
+		RequestString: query,
+		Context:       context.Background(),
+	})
+
+	expected := &graphql.Result{
+		Data: map[string]interface{}{
+			"a": nil,
+		},
+		Errors: []gqlerrors.FormattedError{
+			gqlerrors.FormatError(&gqlerrors.Error{
+				Message: "test error",
+				Locations: []location.SourceLocation{
+					{Line: 1, Column: 9},
+				},
+				Path:          []interface{}{"a"},
+				OriginalError: errors.New("test error"),
+			}),
+		},
+	}
+
+	if !testutil.EqualResults(expected, result) {
+		t.Fatalf("Unexpected result, Diff: %v", testutil.Diff(expected, result))
 	}
 }
 
